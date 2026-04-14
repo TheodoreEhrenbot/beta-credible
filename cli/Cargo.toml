@@ -1,0 +1,14 @@
+[package]
+name = "beta-credible"
+version = "0.1.0"
+edition = "2021"
+description = "CLI for Bayesian credible intervals and same-p comparison"
+license = "MIT"
+
+[[bin]]
+name = "beta-credible"
+path = "src/main.rs"
+
+[dependencies]
+beta-credible-stats = { path = "../stats" }
+clap = { version = "4", features = ["derive"] }

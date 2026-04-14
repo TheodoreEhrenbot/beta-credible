@@ -1,0 +1,10 @@
+[package]
+name = "beta-credible-stats"
+version = "0.1.0"
+edition = "2021"
+description = "Bayesian credible intervals and same-p comparison for proportions"
+license = "MIT"
+
+[dependencies]
+statrs = "0.17"
+thiserror = "1"
