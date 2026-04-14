@@ -79,11 +79,11 @@ Bayesian credible interval (uniform prior)
 Bayesian same-p comparison (uniform priors, equal model priors)
   Sample 1:        5/10 successes
   Sample 2:        7/10 successes
-  P(same p | data): 0.523648
-  P(diff p | data): 0.476352
-  Log Bayes factor: 0.0945  (same vs diff)
+  P(same p | data): 0.580394
+  P(diff p | data): 0.419606
+  Log Bayes factor (same/diff): 0.3244
   Interpretation:   Weak evidence for same p
-  (Kass & Raftery 1995: |log BF| > 3 is strong evidence)
+  (Kass & Raftery 1995 scale: |log BF| > 3 is strong)
 ```
 
 ---
