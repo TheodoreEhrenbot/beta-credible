@@ -3,3 +3,4 @@ dist/
 _site/
 .runtime/
 CLAUDE.md
+.beads/redirect
