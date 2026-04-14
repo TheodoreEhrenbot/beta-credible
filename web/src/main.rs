@@ -167,7 +167,7 @@ fn app() -> Html {
         <h1>{"beta-credible"}</h1>
         <p class="desc">
             {"Bayesian proportion inference. "}
-            <a href="https://github.com/TheodoreEhrenborg/beta-credible">{"Source & CLI on GitHub"}</a>
+            <a href="https://github.com/TheodoreEhrenbot/beta-credible">{"Source & CLI on GitHub"}</a>
             {". Prior: Uniform = Beta(1,1)."}
         </p>
 

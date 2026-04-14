@@ -2,7 +2,7 @@
 
 Bayesian proportion inference: credible intervals and two-sample same-*p* comparison.
 
-**Web app**: https://theodoreehrenborg.github.io/beta-credible/
+**Web app**: https://theodoreehrenbot.github.io/beta-credible/
 
 ---
 
