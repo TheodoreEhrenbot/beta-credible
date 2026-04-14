@@ -62,7 +62,7 @@ jobs:
       - name: Build WASM frontend
         run: |
           cd web
-          trunk build --release
+          trunk build --release --public-url=/beta-credible/
 
       - name: Prepare Pages artifact
         run: cp -r web/dist _site
