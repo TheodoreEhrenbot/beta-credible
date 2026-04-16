@@ -85,6 +85,7 @@ dependencies = [
 name = "beta-credible-stats"
 version = "0.1.0"
 dependencies = [
+ "rand",
  "statrs",
  "thiserror",
 ]
@@ -94,6 +95,7 @@ name = "beta-credible-web"
 version = "0.1.0"
 dependencies = [
  "beta-credible-stats",
+ "getrandom",
  "web-sys",
  "yew",
 ]

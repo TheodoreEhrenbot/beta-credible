@@ -7,3 +7,4 @@ edition = "2021"
 beta-credible-stats = { path = "../stats" }
 yew = { version = "0.21.0", features = ["csr"] }
 web-sys = { version = "0.3", features = ["HtmlInputElement"] }
+getrandom = { version = "0.2", features = ["js"] }
