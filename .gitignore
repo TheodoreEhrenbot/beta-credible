@@ -4,3 +4,10 @@ _site/
 .runtime/
 CLAUDE.md
 .beads/redirect
+
+# Gas Town (added by gt)
+.claude/
+.logs/
+__pycache__/
+state.json
+CLAUDE.local.md
