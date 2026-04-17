@@ -72,6 +72,7 @@ use statrs::function::beta::ln_beta;
 use statrs::distribution::Beta as StatrsBeta;
 use thiserror::Error;
 use rand::distributions::Distribution;
+use rand::Rng;
 
 /// Errors from invalid inputs.
 #[derive(Debug, Error, PartialEq)]
@@ -86,6 +87,8 @@ pub enum StatsError {
     BetaError(String),
     #[error("invalid rate: {0}")]
     InvalidRate(String),
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
 }
 
 /// Result of a single-proportion credible interval computation.
@@ -377,6 +380,339 @@ pub fn compare_two_trials(
         ci2_upper: ci2.upper,
         prob_diff_gt_threshold,
         threshold,
+    })
+}
+
+/// Per-intervention result from the hierarchical Bayesian comparison.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InterventionResult {
+    /// 0-based index of this intervention.
+    pub index: usize,
+    /// s_k / n_k (naive, before shrinkage).
+    pub naive_rate: f64,
+    /// Posterior mean of θ_k from MCMC.
+    pub posterior_mean_theta: f64,
+    /// Posterior mean of δ_k = θ_k − θ_control.
+    pub mean_delta: f64,
+    /// 95% HDI lower bound on δ_k.
+    pub hdi_lower: f64,
+    /// 95% HDI upper bound on δ_k.
+    pub hdi_upper: f64,
+    /// P(δ_k > 0) from MCMC samples.
+    pub prob_delta_gt_zero: f64,
+    /// Fraction moved from naive toward group mean μ. None if naive == group mean.
+    pub shrinkage: Option<f64>,
+    /// True if 95% HDI on δ_k excludes zero.
+    pub significant: bool,
+}
+
+/// Result of the hierarchical Bayesian comparison (control vs K interventions).
+#[derive(Debug, Clone, PartialEq)]
+pub struct HierarchicalResult {
+    pub interventions: Vec<InterventionResult>,
+    /// Posterior mean of μ (shared group mean across interventions).
+    pub mu_mean: f64,
+    pub mu_hdi_lower: f64,
+    pub mu_hdi_upper: f64,
+    /// Posterior mean of κ (concentration parameter).
+    pub kappa_mean: f64,
+    pub kappa_hdi_lower: f64,
+    pub kappa_hdi_upper: f64,
+    /// Posterior mean of θ_control.
+    pub control_mean: f64,
+    /// Number of post-burn-in, thinned samples stored.
+    pub n_samples: usize,
+}
+
+/// 95% HDI (highest density interval) from sorted samples.
+fn hdi_95(sorted: &[f64]) -> (f64, f64) {
+    let n = sorted.len();
+    if n == 0 {
+        return (0.0, 0.0);
+    }
+    if n == 1 {
+        return (sorted[0], sorted[0]);
+    }
+    let window = ((0.95 * n as f64).floor() as usize).max(1).min(n - 1);
+    let count = n - window;
+    let mut best_lo = sorted[0];
+    let mut best_hi = sorted[window];
+    let mut best_width = best_hi - best_lo;
+    for i in 1..count {
+        let lo = sorted[i];
+        let hi = sorted[i + window];
+        let w = hi - lo;
+        if w < best_width {
+            best_width = w;
+            best_lo = lo;
+            best_hi = hi;
+        }
+    }
+    (best_lo, best_hi)
+}
+
+/// Standard normal variate via Box-Muller transform.
+fn randn<R: Rng>(rng: &mut R) -> f64 {
+    let u1 = rng.gen::<f64>().max(f64::MIN_POSITIVE);
+    let u2 = rng.gen::<f64>();
+    (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+}
+
+/// Compare control against K interventions via hierarchical Bayesian MCMC.
+///
+/// Model (Gelman et al. BDA 3rd ed., Ch. 5):
+///   θ_control ~ Beta(1,1)  (uniform prior)
+///   μ ~ Uniform(0,1),  κ ~ Exponential(1)
+///   θ_k | μ, κ ~ Beta(μκ, (1−μ)κ)  for each intervention k
+///   s_0 ~ Binomial(n_0, θ_control),  s_k ~ Binomial(n_k, θ_k)
+///
+/// Inference: Metropolis-within-Gibbs with logit/log random-walk proposals.
+/// Posterior summaries: posterior means and 95% HDIs for all parameters.
+/// Per-intervention δ_k = θ_k − θ_control with HDI and P(δ_k > 0).
+///
+/// # Arguments
+/// - `s0`, `n0`: control successes and trials
+/// - `interventions`: slice of (s_k, n_k) for each intervention
+/// - `n_iter`: total MCMC iterations
+/// - `n_burnin`: burn-in iterations to discard
+/// - `thin`: keep every `thin`-th sample after burn-in
+pub fn hierarchical_bayes_compare(
+    s0: u64,
+    n0: u64,
+    interventions: &[(u64, u64)],
+    n_iter: usize,
+    n_burnin: usize,
+    thin: usize,
+) -> Result<HierarchicalResult, StatsError> {
+    if n0 == 0 {
+        return Err(StatsError::ZeroTrials(n0));
+    }
+    if s0 > n0 {
+        return Err(StatsError::ExceedsTrials { n: s0, m: n0 });
+    }
+    if interventions.is_empty() {
+        return Err(StatsError::InvalidInput(
+            "at least one intervention required".to_string(),
+        ));
+    }
+    for &(sk, nk) in interventions {
+        if nk == 0 {
+            return Err(StatsError::ZeroTrials(nk));
+        }
+        if sk > nk {
+            return Err(StatsError::ExceedsTrials { n: sk, m: nk });
+        }
+    }
+    if n_iter <= n_burnin {
+        return Err(StatsError::InvalidInput(
+            "n_iter must be greater than n_burnin".to_string(),
+        ));
+    }
+    let thin = thin.max(1);
+    let mut rng = rand::thread_rng();
+    run_hierarchical_mcmc(s0, n0, interventions, n_iter, n_burnin, thin, &mut rng)
+}
+
+fn run_hierarchical_mcmc<R: Rng>(
+    s0: u64,
+    n0: u64,
+    interventions: &[(u64, u64)],
+    n_iter: usize,
+    n_burnin: usize,
+    thin: usize,
+    rng: &mut R,
+) -> Result<HierarchicalResult, StatsError> {
+    let k = interventions.len();
+
+    // Clamp to open interval to avoid log(0)
+    let clamp01 = |x: f64| x.clamp(1e-9, 1.0 - 1e-9);
+    let logit = |x: f64| { let x = clamp01(x); (x / (1.0 - x)).ln() };
+    let sigmoid = |x: f64| clamp01(1.0 / (1.0 + (-x).exp()));
+
+    // Initialise from posterior means of independent models
+    let mut theta_ctrl = (s0 as f64 + 1.0) / (n0 as f64 + 2.0);
+    let mut thetas: Vec<f64> = interventions
+        .iter()
+        .map(|&(sk, nk)| (sk as f64 + 1.0) / (nk as f64 + 2.0))
+        .collect();
+    let mut mu = (thetas.iter().sum::<f64>() / k as f64).clamp(0.01, 0.99);
+    let mut kappa = 2.0_f64;
+
+    // Maintained running sums: sum_k ln(θ_k) and sum_k ln(1-θ_k)
+    // Allows O(1) μ and κ acceptance ratios instead of O(K).
+    let mut log_sum_theta: f64 = thetas.iter().map(|t| t.ln()).sum();
+    let mut log_sum_1m_theta: f64 = thetas.iter().map(|t| (1.0 - t).ln()).sum();
+
+    // Proposal scales (logit/log space)
+    const SIGMA_THETA: f64 = 0.3;
+    const SIGMA_MU: f64 = 0.3;
+    const SIGMA_KAPPA: f64 = 0.5;
+
+    let n_keep = (n_iter - n_burnin).div_ceil(thin);
+    let mut samp_ctrl: Vec<f64> = Vec::with_capacity(n_keep);
+    let mut samp_thetas: Vec<Vec<f64>> = vec![Vec::with_capacity(n_keep); k];
+    let mut samp_mu: Vec<f64> = Vec::with_capacity(n_keep);
+    let mut samp_kappa: Vec<f64> = Vec::with_capacity(n_keep);
+
+    for iter in 0..n_iter {
+        // ── Update θ_control (flat Beta(1,1) prior → only likelihood + Jacobian) ──
+        {
+            let logit_new = logit(theta_ctrl) + SIGMA_THETA * randn(rng);
+            let theta_new = sigmoid(logit_new);
+            let ll_d = s0 as f64 * (theta_new.ln() - theta_ctrl.ln())
+                + (n0 - s0) as f64 * ((1.0 - theta_new).ln() - (1.0 - theta_ctrl).ln());
+            let jac = (theta_new.ln() + (1.0 - theta_new).ln())
+                - (theta_ctrl.ln() + (1.0 - theta_ctrl).ln());
+            let la = ll_d + jac;
+            if !la.is_nan() && rng.gen::<f64>().ln() < la {
+                theta_ctrl = theta_new;
+            }
+        }
+
+        // ── Update each θ_k ──
+        let a_cur = mu * kappa;
+        let b_cur = (1.0 - mu) * kappa;
+        for i in 0..k {
+            let (sk, nk) = interventions[i];
+            let logit_new = logit(thetas[i]) + SIGMA_THETA * randn(rng);
+            let theta_new = sigmoid(logit_new);
+            // ln_beta cancels in the prior ratio → no ln_beta call needed
+            let ll_d = sk as f64 * (theta_new.ln() - thetas[i].ln())
+                + (nk - sk) as f64 * ((1.0 - theta_new).ln() - (1.0 - thetas[i]).ln());
+            let lp_d = (a_cur - 1.0) * (theta_new.ln() - thetas[i].ln())
+                + (b_cur - 1.0) * ((1.0 - theta_new).ln() - (1.0 - thetas[i]).ln());
+            let jac = (theta_new.ln() + (1.0 - theta_new).ln())
+                - (thetas[i].ln() + (1.0 - thetas[i]).ln());
+            let la = ll_d + lp_d + jac;
+            if !la.is_nan() && rng.gen::<f64>().ln() < la {
+                log_sum_theta += theta_new.ln() - thetas[i].ln();
+                log_sum_1m_theta += (1.0 - theta_new).ln() - (1.0 - thetas[i]).ln();
+                thetas[i] = theta_new;
+            }
+        }
+
+        // ── Update μ (Uniform prior, logit proposal) ──
+        {
+            let logit_new = logit(mu) + SIGMA_MU * randn(rng);
+            let mu_new = sigmoid(logit_new);
+            let a_old = mu * kappa;
+            let b_old = (1.0 - mu) * kappa;
+            let a_new = mu_new * kappa;
+            let b_new = (1.0 - mu_new) * kappa;
+            if a_new > 1e-10 && b_new > 1e-10 && a_old > 1e-10 && b_old > 1e-10 {
+                let lp_d = (a_new - a_old) * log_sum_theta
+                    + (b_new - b_old) * log_sum_1m_theta
+                    - k as f64 * (ln_beta(a_new, b_new) - ln_beta(a_old, b_old));
+                let jac = (mu_new.ln() + (1.0 - mu_new).ln())
+                    - (mu.ln() + (1.0 - mu).ln());
+                let la = lp_d + jac;
+                if !la.is_nan() && rng.gen::<f64>().ln() < la {
+                    mu = mu_new;
+                }
+            }
+        }
+
+        // ── Update κ (Exponential(1) prior, log proposal) ──
+        {
+            let log_kappa_new = kappa.ln() + SIGMA_KAPPA * randn(rng);
+            let kappa_new = log_kappa_new.exp();
+            let a_old = mu * kappa;
+            let b_old = (1.0 - mu) * kappa;
+            let a_new = mu * kappa_new;
+            let b_new = (1.0 - mu) * kappa_new;
+            if a_new > 1e-10 && b_new > 1e-10 && a_old > 1e-10 && b_old > 1e-10 {
+                let lp_d = (a_new - a_old) * log_sum_theta
+                    + (b_new - b_old) * log_sum_1m_theta
+                    - k as f64 * (ln_beta(a_new, b_new) - ln_beta(a_old, b_old));
+                let prior_d = -kappa_new + kappa; // log Exp(1) ratio
+                let jac = log_kappa_new - kappa.ln();
+                let la = lp_d + prior_d + jac;
+                if !la.is_nan() && rng.gen::<f64>().ln() < la {
+                    kappa = kappa_new;
+                }
+            }
+        }
+
+        if iter >= n_burnin && (iter - n_burnin).is_multiple_of(thin) {
+            samp_ctrl.push(theta_ctrl);
+            for i in 0..k {
+                samp_thetas[i].push(thetas[i]);
+            }
+            samp_mu.push(mu);
+            samp_kappa.push(kappa);
+        }
+    }
+
+    let n_samples = samp_ctrl.len();
+    if n_samples == 0 {
+        return Err(StatsError::InvalidInput(
+            "no samples collected (n_iter <= n_burnin)".to_string(),
+        ));
+    }
+
+    // Posterior summaries for μ and κ
+    let mu_mean = samp_mu.iter().sum::<f64>() / n_samples as f64;
+    let mut mu_sorted = samp_mu.clone();
+    mu_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let (mu_hdi_lower, mu_hdi_upper) = hdi_95(&mu_sorted);
+
+    let kappa_mean = samp_kappa.iter().sum::<f64>() / n_samples as f64;
+    let mut kappa_sorted = samp_kappa.clone();
+    kappa_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let (kappa_hdi_lower, kappa_hdi_upper) = hdi_95(&kappa_sorted);
+
+    let control_mean = samp_ctrl.iter().sum::<f64>() / n_samples as f64;
+
+    // Per-intervention results
+    let mut ivs_out = Vec::with_capacity(k);
+    for i in 0..k {
+        let (sk, nk) = interventions[i];
+        let naive_rate = sk as f64 / nk as f64;
+
+        let theta_samps = &samp_thetas[i];
+        let posterior_mean_theta = theta_samps.iter().sum::<f64>() / n_samples as f64;
+
+        let mut deltas: Vec<f64> = theta_samps
+            .iter()
+            .zip(samp_ctrl.iter())
+            .map(|(t, c)| t - c)
+            .collect();
+        let mean_delta = deltas.iter().sum::<f64>() / n_samples as f64;
+        deltas.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let (hdi_lower, hdi_upper) = hdi_95(&deltas);
+        let gt_zero = deltas.partition_point(|&d| d <= 0.0);
+        let prob_delta_gt_zero = (n_samples - gt_zero) as f64 / n_samples as f64;
+        let significant = hdi_lower > 0.0 || hdi_upper < 0.0;
+
+        let shrinkage = if (naive_rate - mu_mean).abs() < 1e-10 {
+            None
+        } else {
+            Some((naive_rate - posterior_mean_theta) / (naive_rate - mu_mean))
+        };
+
+        ivs_out.push(InterventionResult {
+            index: i,
+            naive_rate,
+            posterior_mean_theta,
+            mean_delta,
+            hdi_lower,
+            hdi_upper,
+            prob_delta_gt_zero,
+            shrinkage,
+            significant,
+        });
+    }
+
+    Ok(HierarchicalResult {
+        interventions: ivs_out,
+        mu_mean,
+        mu_hdi_lower,
+        mu_hdi_upper,
+        kappa_mean,
+        kappa_hdi_lower,
+        kappa_hdi_upper,
+        control_mean,
+        n_samples,
     })
 }
 
@@ -900,5 +1236,108 @@ mod tests {
     fn test_compare_exceeds_trials_error() {
         assert!(compare_two_trials(11, 10, 5, 10, 0.0).is_err());
         assert!(compare_two_trials(5, 10, 11, 10, 0.0).is_err());
+    }
+
+    // ── hierarchical_bayes_compare ─────────────────────────────────────────
+
+    const HIER_ITER: usize = 30_000;
+    const HIER_BURNIN: usize = 5_000;
+    const HIER_THIN: usize = 3;
+
+    /// K=1: single-intervention hierarchical should give δ_1 > 0 when
+    /// intervention rate is clearly above control rate.
+    #[test]
+    fn test_hierarchical_k1_positive_delta() {
+        // control: 10/100, intervention: 40/100 → clearly better
+        let r = hierarchical_bayes_compare(10, 100, &[(40, 100)], HIER_ITER, HIER_BURNIN, HIER_THIN).unwrap();
+        assert_eq!(r.interventions.len(), 1);
+        let iv = &r.interventions[0];
+        assert!(iv.mean_delta > 0.2, "delta should be strongly positive, got {}", iv.mean_delta);
+        assert!(iv.prob_delta_gt_zero > 0.99, "P(delta>0) should be ~1, got {}", iv.prob_delta_gt_zero);
+        assert!(iv.significant, "95% HDI should exclude 0");
+    }
+
+    /// All interventions identical to control → δ_k near 0, HDIs cross zero.
+    #[test]
+    fn test_hierarchical_identical_rates_delta_near_zero() {
+        // control: 50/200, all interventions also ~50/200
+        let ivs = &[(50, 200), (50, 200), (50, 200)];
+        let r = hierarchical_bayes_compare(50, 200, ivs, HIER_ITER, HIER_BURNIN, HIER_THIN).unwrap();
+        for iv in &r.interventions {
+            assert!(
+                iv.mean_delta.abs() < 0.08,
+                "identical rates → |delta| should be small, got {}",
+                iv.mean_delta
+            );
+            assert!(
+                !iv.significant,
+                "HDI should cross zero for identical rates"
+            );
+        }
+    }
+
+    /// Shrinkage: one outlier among mediocre interventions should be pulled toward μ.
+    #[test]
+    fn test_hierarchical_shrinkage_outlier_pulled() {
+        // control: 10/100, three mediocre (12-13/100), one outlier (40/100)
+        let ivs = &[(12, 100), (13, 100), (11, 100), (40, 100)];
+        let r = hierarchical_bayes_compare(10, 100, ivs, HIER_ITER, HIER_BURNIN, HIER_THIN).unwrap();
+        let outlier = &r.interventions[3]; // 40/100
+        let naive_outlier = 40.0 / 100.0; // 0.40
+        // Posterior mean should be pulled down toward group mean
+        assert!(
+            outlier.posterior_mean_theta < naive_outlier,
+            "outlier should be shrunk downward: naive={naive_outlier}, post={}",
+            outlier.posterior_mean_theta
+        );
+        // Shrinkage fraction should be positive (moved toward group mean)
+        if let Some(s) = outlier.shrinkage {
+            assert!(s > 0.0, "shrinkage should be positive for outlier above group mean, got {s}");
+        }
+    }
+
+    /// κ should be small (wide prior) when interventions are heterogeneous,
+    /// and larger when they are homogeneous.
+    #[test]
+    fn test_hierarchical_kappa_heterogeneous_vs_homogeneous() {
+        // Heterogeneous: 5/100, 50/100, 95/100
+        let r_het = hierarchical_bayes_compare(
+            50, 100,
+            &[(5, 100), (50, 100), (95, 100)],
+            HIER_ITER, HIER_BURNIN, HIER_THIN,
+        ).unwrap();
+        // Homogeneous: all ~50/100
+        let r_hom = hierarchical_bayes_compare(
+            50, 100,
+            &[(48, 100), (50, 100), (52, 100)],
+            HIER_ITER, HIER_BURNIN, HIER_THIN,
+        ).unwrap();
+        assert!(
+            r_het.kappa_mean < r_hom.kappa_mean,
+            "heterogeneous interventions → smaller κ; het={}, hom={}",
+            r_het.kappa_mean, r_hom.kappa_mean
+        );
+    }
+
+    /// n_samples should equal expected post-burn-in thinned count.
+    #[test]
+    fn test_hierarchical_sample_count() {
+        let r = hierarchical_bayes_compare(5, 20, &[(8, 20)], 10_000, 2_000, 2).unwrap();
+        let expected = (10_000 - 2_000 + 1) / 2; // ceiling div
+        assert!(
+            (r.n_samples as i64 - expected as i64).abs() <= 1,
+            "unexpected sample count: got {}, expected ~{expected}",
+            r.n_samples
+        );
+    }
+
+    /// Error cases for hierarchical function.
+    #[test]
+    fn test_hierarchical_error_cases() {
+        assert!(hierarchical_bayes_compare(0, 0, &[(5, 10)], 100, 10, 1).is_err());
+        assert!(hierarchical_bayes_compare(5, 10, &[], 100, 10, 1).is_err());
+        assert!(hierarchical_bayes_compare(5, 10, &[(0, 0)], 100, 10, 1).is_err());
+        assert!(hierarchical_bayes_compare(11, 10, &[(5, 10)], 100, 10, 1).is_err());
+        assert!(hierarchical_bayes_compare(5, 10, &[(5, 10)], 50, 100, 1).is_err());
     }
 }

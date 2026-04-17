@@ -1,5 +1,6 @@
 use beta_credible_stats::{
-    compare_two_trials, credible_interval, parse_rate, same_p_probability,
+    compare_two_trials, credible_interval, hierarchical_bayes_compare, parse_rate,
+    same_p_probability,
 };
 use yew::prelude::*;
 
@@ -8,6 +9,7 @@ enum Tab {
     Interval,
     SameP,
     Compare,
+    Hierarchical,
 }
 
 #[function_component(App)]
@@ -62,6 +64,10 @@ fn app() -> Html {
     let on_tab_compare = {
         let tab = tab.clone();
         Callback::from(move |_| tab.set(Tab::Compare))
+    };
+    let on_tab_hierarchical = {
+        let tab = tab.clone();
+        Callback::from(move |_| tab.set(Tab::Hierarchical))
     };
 
     // ── Interval compute (n + m direct entry) ────────────────────────────────
@@ -386,6 +392,124 @@ fn app() -> Html {
         Callback::from(move |_| compare_rate_mode.set(true))
     };
 
+    // ── Hierarchical state ────────────────────────────────────────────────────
+    let hier_s0_str = use_state(|| "10".to_string());
+    let hier_n0_str = use_state(|| "100".to_string());
+    let hier_n0_rate_str = use_state(|| "100".to_string());
+    let hier_rate0_str = use_state(|| "10%".to_string());
+    let hier_rate_mode = use_state(|| false);
+    // Vec of (sk_str, nk_str) for n/m mode
+    let hier_ivs: UseStateHandle<Vec<(String, String)>> = use_state(|| vec![
+        ("30".to_string(), "200".to_string()),
+        ("45".to_string(), "200".to_string()),
+        ("25".to_string(), "200".to_string()),
+    ]);
+    // Vec of (mk_str, rate_str) for rate mode
+    let hier_ivs_rate: UseStateHandle<Vec<(String, String)>> = use_state(|| vec![
+        ("200".to_string(), "15%".to_string()),
+        ("200".to_string(), "22%".to_string()),
+        ("200".to_string(), "12%".to_string()),
+    ]);
+    let hier_result: UseStateHandle<Option<String>> = use_state(|| None);
+
+    // ── Hierarchical: toggle input mode ──────────────────────────────────────
+    let on_hier_toggle_nm = {
+        let hier_rate_mode = hier_rate_mode.clone();
+        Callback::from(move |_| hier_rate_mode.set(false))
+    };
+    let on_hier_toggle_rate = {
+        let hier_rate_mode = hier_rate_mode.clone();
+        Callback::from(move |_| hier_rate_mode.set(true))
+    };
+
+    // ── Hierarchical: add/remove intervention rows ────────────────────────────
+    let on_hier_add_iv = {
+        let hier_ivs = hier_ivs.clone();
+        Callback::from(move |_: MouseEvent| {
+            let mut v = (*hier_ivs).clone();
+            v.push(("0".to_string(), "100".to_string()));
+            hier_ivs.set(v);
+        })
+    };
+    let on_hier_add_iv_rate = {
+        let hier_ivs_rate = hier_ivs_rate.clone();
+        Callback::from(move |_: MouseEvent| {
+            let mut v = (*hier_ivs_rate).clone();
+            v.push(("100".to_string(), "10%".to_string()));
+            hier_ivs_rate.set(v);
+        })
+    };
+
+    // ── Hierarchical compute (n/m mode) ──────────────────────────────────────
+    let on_hier_compute = {
+        let hier_s0_str = hier_s0_str.clone();
+        let hier_n0_str = hier_n0_str.clone();
+        let hier_ivs = hier_ivs.clone();
+        let result = hier_result.clone();
+        Callback::from(move |_: MouseEvent| {
+            let s0: u64 = match hier_s0_str.trim().parse() {
+                Ok(v) => v,
+                Err(_) => { result.set(Some("Error: control successes must be a non-negative integer".to_string())); return; }
+            };
+            let n0: u64 = match hier_n0_str.trim().parse() {
+                Ok(v) => v,
+                Err(_) => { result.set(Some("Error: control trials must be a positive integer".to_string())); return; }
+            };
+            let mut ivs: Vec<(u64, u64)> = Vec::new();
+            for (i, (sk_s, nk_s)) in hier_ivs.iter().enumerate() {
+                let sk: u64 = match sk_s.trim().parse() {
+                    Ok(v) => v,
+                    Err(_) => { result.set(Some(format!("Error: intervention {} successes must be a non-negative integer", i+1))); return; }
+                };
+                let nk: u64 = match nk_s.trim().parse() {
+                    Ok(v) => v,
+                    Err(_) => { result.set(Some(format!("Error: intervention {} trials must be a positive integer", i+1))); return; }
+                };
+                ivs.push((sk, nk));
+            }
+            match hierarchical_bayes_compare(s0, n0, &ivs, 20_000, 5_000, 2) {
+                Ok(r) => result.set(Some(format_hier_result(s0, n0, &ivs, &r))),
+                Err(e) => result.set(Some(format!("Error: {e}"))),
+            }
+        })
+    };
+
+    // ── Hierarchical compute (rate mode) ─────────────────────────────────────
+    let on_hier_compute_rate = {
+        let hier_n0_rate_str = hier_n0_rate_str.clone();
+        let hier_rate0_str = hier_rate0_str.clone();
+        let hier_ivs_rate = hier_ivs_rate.clone();
+        let result = hier_result.clone();
+        Callback::from(move |_: MouseEvent| {
+            let n0: u64 = match hier_n0_rate_str.trim().parse() {
+                Ok(v) => v,
+                Err(_) => { result.set(Some("Error: control trials must be a positive integer".to_string())); return; }
+            };
+            let rate0 = match parse_rate(&hier_rate0_str) {
+                Ok(v) => v,
+                Err(e) => { result.set(Some(format!("Error: {e}"))); return; }
+            };
+            let s0 = (rate0 * n0 as f64).round() as u64;
+            let mut ivs: Vec<(u64, u64)> = Vec::new();
+            for (i, (mk_s, rate_s)) in hier_ivs_rate.iter().enumerate() {
+                let nk: u64 = match mk_s.trim().parse() {
+                    Ok(v) => v,
+                    Err(_) => { result.set(Some(format!("Error: intervention {} trials must be a positive integer", i+1))); return; }
+                };
+                let rk = match parse_rate(rate_s) {
+                    Ok(v) => v,
+                    Err(e) => { result.set(Some(format!("Error: {e}"))); return; }
+                };
+                let sk = (rk * nk as f64).round() as u64;
+                ivs.push((sk, nk));
+            }
+            match hierarchical_bayes_compare(s0, n0, &ivs, 20_000, 5_000, 2) {
+                Ok(r) => result.set(Some(format_hier_result(s0, n0, &ivs, &r))),
+                Err(e) => result.set(Some(format!("Error: {e}"))),
+            }
+        })
+    };
+
     // ── Input handlers ────────────────────────────────────────────────────────
     macro_rules! on_input {
         ($state:expr) => {{
@@ -398,6 +522,85 @@ fn app() -> Html {
             })
         }};
     }
+
+    // ── Pre-compute dynamic rows for hierarchical tab ────────────────────────
+    let hier_rows: Html = hier_ivs.iter().enumerate().map(|(i, (sk, nk))| {
+        let sk = sk.clone();
+        let nk = nk.clone();
+        let on_sk = {
+            let ivs = hier_ivs.clone();
+            Callback::from(move |e: InputEvent| {
+                use yew::TargetCast;
+                use web_sys::HtmlInputElement;
+                let inp: HtmlInputElement = e.target_unchecked_into();
+                let mut v = (*ivs).clone(); v[i].0 = inp.value(); ivs.set(v);
+            })
+        };
+        let on_nk = {
+            let ivs = hier_ivs.clone();
+            Callback::from(move |e: InputEvent| {
+                use yew::TargetCast;
+                use web_sys::HtmlInputElement;
+                let inp: HtmlInputElement = e.target_unchecked_into();
+                let mut v = (*ivs).clone(); v[i].1 = inp.value(); ivs.set(v);
+            })
+        };
+        let can_remove = hier_ivs.len() > 1;
+        let on_rm = {
+            let ivs = hier_ivs.clone();
+            Callback::from(move |_: MouseEvent| {
+                let mut v = (*ivs).clone();
+                if v.len() > 1 { v.remove(i); ivs.set(v); }
+            })
+        };
+        html! {
+            <tr key={i.to_string()}>
+                <td>{format!("Arm {}", i+1)}</td>
+                <td><input type="number" min="0" value={sk} oninput={on_sk} /></td>
+                <td><input type="number" min="1" value={nk} oninput={on_nk} /></td>
+                <td><button onclick={on_rm} disabled={!can_remove}>{"−"}</button></td>
+            </tr>
+        }
+    }).collect();
+
+    let hier_rows_rate: Html = hier_ivs_rate.iter().enumerate().map(|(i, (mk, rk))| {
+        let mk = mk.clone();
+        let rk = rk.clone();
+        let on_mk = {
+            let ivs = hier_ivs_rate.clone();
+            Callback::from(move |e: InputEvent| {
+                use yew::TargetCast;
+                use web_sys::HtmlInputElement;
+                let inp: HtmlInputElement = e.target_unchecked_into();
+                let mut v = (*ivs).clone(); v[i].0 = inp.value(); ivs.set(v);
+            })
+        };
+        let on_rk = {
+            let ivs = hier_ivs_rate.clone();
+            Callback::from(move |e: InputEvent| {
+                use yew::TargetCast;
+                use web_sys::HtmlInputElement;
+                let inp: HtmlInputElement = e.target_unchecked_into();
+                let mut v = (*ivs).clone(); v[i].1 = inp.value(); ivs.set(v);
+            })
+        };
+        let can_remove = hier_ivs_rate.len() > 1;
+        let on_rm = {
+            let ivs = hier_ivs_rate.clone();
+            Callback::from(move |_: MouseEvent| {
+                let mut v = (*ivs).clone();
+                if v.len() > 1 { v.remove(i); ivs.set(v); }
+            })
+        };
+        html! {
+            <tr key={i.to_string()}>
+                <td>{format!("Arm {}", i+1)}</td>
+                <td><input type="number" min="1" value={mk} oninput={on_mk} /></td>
+                <td><input type="text" style="width:80px" value={rk} oninput={on_rk} /></td>
+                <td><button onclick={on_rm} disabled={!can_remove}>{"−"}</button></td>
+            </tr>
+        }
+    }).collect();
 
     // ── Render ────────────────────────────────────────────────────────────────
     html! {
@@ -427,6 +630,12 @@ fn app() -> Html {
                 onclick={on_tab_compare}
             >
                 {"Compare Two Trials"}
+            </div>
+            <div
+                class={if *tab == Tab::Hierarchical { "tab active" } else { "tab" }}
+                onclick={on_tab_hierarchical}
+            >
+                {"Control vs Interventions"}
             </div>
         </div>
 
@@ -532,7 +741,7 @@ fn app() -> Html {
                 }
             } else { html!{} } }
             </>
-        }} else { html! {
+        }} else if *tab == Tab::Compare { html! {
             <>
             <h2>{"Mode 3: Compare two trials"}</h2>
             <p class="desc">
@@ -618,9 +827,156 @@ fn app() -> Html {
                 </>
             }} }
             </>
+        }} else { html! {
+            // ── Hierarchical tab ─────────────────────────────────────────────
+            <>
+            <h2>{"Mode 4: Control vs Interventions (hierarchical Bayesian)"}</h2>
+            <p class="desc">
+                {"Compare one control arm against K intervention arms using a hierarchical model. "}
+                {"Interventions share a common Beta prior: θ_k | μ,κ ~ Beta(μκ,(1−μ)κ). "}
+                {"Posterior via Metropolis-within-Gibbs MCMC (20,000 iter / 5,000 burn-in)."}
+            </p>
+
+            <div class="input-mode-toggle">
+                <button
+                    class={if !*hier_rate_mode { "toggle-btn active" } else { "toggle-btn" }}
+                    onclick={on_hier_toggle_nm}
+                >{"n/m mode"}</button>
+                <button
+                    class={if *hier_rate_mode { "toggle-btn active" } else { "toggle-btn" }}
+                    onclick={on_hier_toggle_rate}
+                >{"rate mode"}</button>
+            </div>
+
+            { if !*hier_rate_mode { html! {
+                <>
+                <h3 class="input-mode-label">{"Control"}</h3>
+                <div class="form-group">
+                    <div class="field">
+                        <label for="hier_s0">{"Control successes (s\u{2080})"}</label>
+                        <input id="hier_s0" type="number" min="0"
+                            value={(*hier_s0_str).clone()} oninput={on_input!(hier_s0_str)} />
+                    </div>
+                    <div class="field">
+                        <label for="hier_n0">{"Control trials (n\u{2080})"}</label>
+                        <input id="hier_n0" type="number" min="1"
+                            value={(*hier_n0_str).clone()} oninput={on_input!(hier_n0_str)} />
+                    </div>
+                </div>
+
+                <h3 class="input-mode-label">{"Interventions"}</h3>
+                <table class="hier-table">
+                    <thead><tr>
+                        <th>{"Arm"}</th>
+                        <th>{"Successes (s\u{2096})"}</th>
+                        <th>{"Trials (n\u{2096})"}</th>
+                        <th></th>
+                    </tr></thead>
+                    <tbody>
+                    { hier_rows }
+                    </tbody>
+                </table>
+                <button onclick={on_hier_add_iv}>{"+ Add intervention"}</button>
+                {" "}
+                <button onclick={on_hier_compute}>{"Compute"}</button>
+                </>
+            }} else { html! {
+                <>
+                <h3 class="input-mode-label">{"Control"}</h3>
+                <div class="form-group">
+                    <div class="field">
+                        <label for="hier_n0r">{"Control trials (n\u{2080})"}</label>
+                        <input id="hier_n0r" type="number" min="1"
+                            value={(*hier_n0_rate_str).clone()} oninput={on_input!(hier_n0_rate_str)} />
+                    </div>
+                    <div class="field">
+                        <label for="hier_rate0">{"Control rate (e.g. '10%')"}</label>
+                        <input id="hier_rate0" type="text" style="width:80px"
+                            value={(*hier_rate0_str).clone()} oninput={on_input!(hier_rate0_str)} />
+                    </div>
+                </div>
+
+                <h3 class="input-mode-label">{"Interventions"}</h3>
+                <table class="hier-table">
+                    <thead><tr>
+                        <th>{"Arm"}</th>
+                        <th>{"Trials (n\u{2096})"}</th>
+                        <th>{"Rate"}</th>
+                        <th></th>
+                    </tr></thead>
+                    <tbody>
+                    { hier_rows_rate }
+                    </tbody>
+                </table>
+                <button onclick={on_hier_add_iv_rate}>{"+ Add intervention"}</button>
+                {" "}
+                <button onclick={on_hier_compute_rate}>{"Compute"}</button>
+                </>
+            }} }
+
+            { if let Some(text) = (*hier_result).clone() {
+                let is_err = text.starts_with("Error");
+                html! {
+                    <div class={if is_err { "result error" } else { "result" }}>{ text }</div>
+                }
+            } else { html!{} } }
+            </>
         }}}
         </>
     }
+}
+
+fn format_hier_result(
+    s0: u64, n0: u64,
+    ivs: &[(u64, u64)],
+    r: &beta_credible_stats::HierarchicalResult,
+) -> String {
+    let mut out = String::new();
+    out.push_str("Hierarchical Bayesian comparison (Metropolis-within-Gibbs MCMC)\n");
+    out.push_str(&format!(
+        "Control:       {s0}/{n0} → posterior mean {cm:.6}\n",
+        cm = r.control_mean
+    ));
+    out.push_str(&format!(
+        "MCMC:          20,000 iter / 5,000 burn-in / thin 2 → {} samples\n",
+        r.n_samples
+    ));
+    out.push_str("\nGroup hyperparameters:\n");
+    out.push_str(&format!(
+        "  μ (mean):      {mm:.6}  [{mlo:.6}, {mhi:.6}] 95% HDI\n",
+        mm = r.mu_mean, mlo = r.mu_hdi_lower, mhi = r.mu_hdi_upper
+    ));
+    out.push_str(&format!(
+        "  κ (concentr.): {km:.4}  [{klo:.4}, {khi:.4}] 95% HDI\n",
+        km = r.kappa_mean, klo = r.kappa_hdi_lower, khi = r.kappa_hdi_upper
+    ));
+    out.push_str("\nIntervention results (δ_k = θ_k − θ_control):\n");
+    out.push_str(&format!(
+        "  {:>4}  {:>7}  {:>8}  {:>8}  {:>22}  {:>7}  {:>7}  {}\n",
+        "#", "Naive", "Post.θ", "δ mean", "95% HDI on δ", "P(δ>0)", "Shrink", "Sig"
+    ));
+    out.push_str(&format!("  {}\n", "-".repeat(74)));
+    for (iv, &(sk, nk)) in r.interventions.iter().zip(ivs.iter()) {
+        let shrink_str = match iv.shrinkage {
+            Some(s) => format!("{:+.0}%", s * 100.0),
+            None => "n/a".to_string(),
+        };
+        let sig_str = if iv.significant { "✓" } else { "" };
+        out.push_str(&format!(
+            "  {:>4}  {:>7.4}  {:>8.6}  {:+8.6}  [{:+9.6},{:+9.6}]  {:>7.4}  {:>7}  {}\n",
+            iv.index + 1,
+            sk as f64 / nk as f64,
+            iv.posterior_mean_theta,
+            iv.mean_delta,
+            iv.hdi_lower,
+            iv.hdi_upper,
+            iv.prob_delta_gt_zero,
+            shrink_str,
+            sig_str,
+        ));
+    }
+    out.push_str("\n(Prior: θ_ctrl~Beta(1,1), μ~Uniform, κ~Exp(1), θ_k|μ,κ~Beta(μκ,(1-μ)κ))");
+    out
 }
 
 fn main() {
