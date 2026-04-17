@@ -40,6 +40,14 @@ fn app() -> Html {
     let cm2_str = use_state(|| "10".to_string());
     let compare_result: UseStateHandle<Option<String>> = use_state(|| None);
 
+    // ── Compare: rate-based alternate input ──────────────────────────────────
+    let compare_rate_mode = use_state(|| false);
+    let cm1_rate_str = use_state(|| "100".to_string());
+    let crate1_str = use_state(|| "70%".to_string());
+    let cm2_rate_str = use_state(|| "100".to_string());
+    let crate2_str = use_state(|| "30%".to_string());
+    let compare_rate_result: UseStateHandle<Option<String>> = use_state(|| None);
+
     // ── Tab click ────────────────────────────────────────────────────────────
     let on_tab_interval = {
         let tab = tab.clone();
@@ -274,6 +282,74 @@ fn app() -> Html {
         })
     };
 
+    // ── Compare: rate compute ────────────────────────────────────────────────
+    let on_compare_rate_compute = {
+        let cm1_rate_str = cm1_rate_str.clone();
+        let crate1_str = crate1_str.clone();
+        let cm2_rate_str = cm2_rate_str.clone();
+        let crate2_str = crate2_str.clone();
+        let result = compare_rate_result.clone();
+        Callback::from(move |_: MouseEvent| {
+            let m1: u64 = match cm1_rate_str.trim().parse() {
+                Ok(v) => v,
+                Err(_) => {
+                    result.set(Some("Error: trial 1 trials must be a positive integer".to_string()));
+                    return;
+                }
+            };
+            let rate1 = match parse_rate(&crate1_str) {
+                Ok(v) => v,
+                Err(e) => { result.set(Some(format!("Error: {e}"))); return; }
+            };
+            let m2: u64 = match cm2_rate_str.trim().parse() {
+                Ok(v) => v,
+                Err(_) => {
+                    result.set(Some("Error: trial 2 trials must be a positive integer".to_string()));
+                    return;
+                }
+            };
+            let rate2 = match parse_rate(&crate2_str) {
+                Ok(v) => v,
+                Err(e) => { result.set(Some(format!("Error: {e}"))); return; }
+            };
+            let n1 = (rate1 * m1 as f64).round() as u64;
+            let n2 = (rate2 * m2 as f64).round() as u64;
+            match compare_two_trials(n1, m1, n2, m2) {
+                Ok(r) => {
+                    let text = format!(
+                        "Compare two trials (independent uniform priors)\n\
+                         Trial 1:         rate={r1_pct:.4}% of {m1} trials → n1={n1}  →  posterior mean {pe1:.6}\n\
+                         Trial 2:         rate={r2_pct:.4}% of {m2} trials → n2={n2}  →  posterior mean {pe2:.6}\n\
+                         Mean difference: E[p1 − p2] = {diff:.6}\n\
+                         P(p1 > p2):      {pgt:.4}  (Monte Carlo, N=100,000)\n\
+                         95% CI on diff:  [{cilo:.6}, {cihi:.6}]  (MC percentiles)\n\
+                         (Gelman et al. BDA 3rd ed. Ch. 2; Robert & Casella MCM 2nd ed. Ch. 3)",
+                        r1_pct = rate1 * 100.0,
+                        r2_pct = rate2 * 100.0,
+                        pe1 = r.mean1,
+                        pe2 = r.mean2,
+                        diff = r.mean_diff,
+                        pgt = r.prob_p1_gt_p2,
+                        cilo = r.ci_diff_lower,
+                        cihi = r.ci_diff_upper,
+                    );
+                    result.set(Some(text));
+                }
+                Err(e) => result.set(Some(format!("Error: {e}"))),
+            }
+        })
+    };
+
+    // ── Compare: toggle input mode ───────────────────────────────────────────
+    let on_compare_toggle_nm = {
+        let compare_rate_mode = compare_rate_mode.clone();
+        Callback::from(move |_| compare_rate_mode.set(false))
+    };
+    let on_compare_toggle_rate = {
+        let compare_rate_mode = compare_rate_mode.clone();
+        Callback::from(move |_| compare_rate_mode.set(true))
+    };
+
     // ── Input handlers ────────────────────────────────────────────────────────
     macro_rules! on_input {
         ($state:expr) => {{
@@ -428,31 +504,84 @@ fn app() -> Html {
                 {"Posteriors: Beta(n+1, m−n+1) for each. "}
                 {"P(p1 > p2) computed via Monte Carlo (N=100,000 samples)."}
             </p>
-            <div class="form-group">
-                <div class="field">
-                    <label for="cn1">{"Trial 1 successes (n1)"}</label>
-                    <input id="cn1" type="number" min="0" value={(*cn1_str).clone()} oninput={on_input!(cn1_str)} />
-                </div>
-                <div class="field">
-                    <label for="cm1">{"Trial 1 trials (m1)"}</label>
-                    <input id="cm1" type="number" min="1" value={(*cm1_str).clone()} oninput={on_input!(cm1_str)} />
-                </div>
-                <div class="field">
-                    <label for="cn2">{"Trial 2 successes (n2)"}</label>
-                    <input id="cn2" type="number" min="0" value={(*cn2_str).clone()} oninput={on_input!(cn2_str)} />
-                </div>
-                <div class="field">
-                    <label for="cm2">{"Trial 2 trials (m2)"}</label>
-                    <input id="cm2" type="number" min="1" value={(*cm2_str).clone()} oninput={on_input!(cm2_str)} />
-                </div>
-                <button onclick={on_compare_compute}>{"Compute"}</button>
+
+            <div class="input-mode-toggle">
+                <button
+                    class={if !*compare_rate_mode { "toggle-btn active" } else { "toggle-btn" }}
+                    onclick={on_compare_toggle_nm}
+                >{"n/m mode"}</button>
+                <button
+                    class={if *compare_rate_mode { "toggle-btn active" } else { "toggle-btn" }}
+                    onclick={on_compare_toggle_rate}
+                >{"rate mode"}</button>
             </div>
-            { if let Some(text) = (*compare_result).clone() {
-                let is_err = text.starts_with("Error");
-                html! {
-                    <div class={if is_err { "result error" } else { "result" }}>{ text }</div>
-                }
-            } else { html!{} } }
+
+            { if !*compare_rate_mode { html! {
+                <>
+                <div class="form-group">
+                    <div class="field">
+                        <label for="cn1">{"Trial 1 successes (n1)"}</label>
+                        <input id="cn1" type="number" min="0" value={(*cn1_str).clone()} oninput={on_input!(cn1_str)} />
+                    </div>
+                    <div class="field">
+                        <label for="cm1">{"Trial 1 trials (m1)"}</label>
+                        <input id="cm1" type="number" min="1" value={(*cm1_str).clone()} oninput={on_input!(cm1_str)} />
+                    </div>
+                    <div class="field">
+                        <label for="cn2">{"Trial 2 successes (n2)"}</label>
+                        <input id="cn2" type="number" min="0" value={(*cn2_str).clone()} oninput={on_input!(cn2_str)} />
+                    </div>
+                    <div class="field">
+                        <label for="cm2">{"Trial 2 trials (m2)"}</label>
+                        <input id="cm2" type="number" min="1" value={(*cm2_str).clone()} oninput={on_input!(cm2_str)} />
+                    </div>
+                    <button onclick={on_compare_compute}>{"Compute"}</button>
+                </div>
+                { if let Some(text) = (*compare_result).clone() {
+                    let is_err = text.starts_with("Error");
+                    html! {
+                        <div class={if is_err { "result error" } else { "result" }}>{ text }</div>
+                    }
+                } else { html!{} } }
+                </>
+            }} else { html! {
+                <>
+                <p class="desc">
+                    {"Enter a rate as a decimal (e.g. "}
+                    <code>{"0.72"}</code>
+                    {") or percentage (e.g. "}
+                    <code>{"72"}</code>
+                    {" or "}
+                    <code>{"72%"}</code>
+                    {"). n = round(rate × m) is computed for you."}
+                </p>
+                <div class="form-group">
+                    <div class="field">
+                        <label for="cm1_rate">{"Trial 1 trials (m1)"}</label>
+                        <input id="cm1_rate" type="number" min="1" value={(*cm1_rate_str).clone()} oninput={on_input!(cm1_rate_str)} />
+                    </div>
+                    <div class="field">
+                        <label for="crate1">{"Trial 1 rate (e.g. '72%' or '0.72')"}</label>
+                        <input id="crate1" type="text" value={(*crate1_str).clone()} oninput={on_input!(crate1_str)} />
+                    </div>
+                    <div class="field">
+                        <label for="cm2_rate">{"Trial 2 trials (m2)"}</label>
+                        <input id="cm2_rate" type="number" min="1" value={(*cm2_rate_str).clone()} oninput={on_input!(cm2_rate_str)} />
+                    </div>
+                    <div class="field">
+                        <label for="crate2">{"Trial 2 rate (e.g. '30%' or '0.30')"}</label>
+                        <input id="crate2" type="text" value={(*crate2_str).clone()} oninput={on_input!(crate2_str)} />
+                    </div>
+                    <button onclick={on_compare_rate_compute}>{"Compute"}</button>
+                </div>
+                { if let Some(text) = (*compare_rate_result).clone() {
+                    let is_err = text.starts_with("Error");
+                    html! {
+                        <div class={if is_err { "result error" } else { "result" }}>{ text }</div>
+                    }
+                } else { html!{} } }
+                </>
+            }} }
             </>
         }}}
         </>

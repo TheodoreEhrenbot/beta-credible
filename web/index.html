@@ -72,6 +72,21 @@
       }
       h3.input-mode-label { font-size: 0.95rem; margin: 1.5rem 0 0.5rem; color: #444; border: none; }
       code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+      .input-mode-toggle { display: flex; gap: 0; margin-bottom: 1rem; }
+      .toggle-btn {
+        padding: 0.35rem 1rem;
+        background: #eee;
+        color: #444;
+        border: 1px solid #bbb;
+        border-right: none;
+        border-radius: 0;
+        cursor: pointer;
+        font-size: 0.9rem;
+      }
+      .toggle-btn:first-child { border-radius: 4px 0 0 4px; }
+      .toggle-btn:last-child { border-right: 1px solid #bbb; border-radius: 0 4px 4px 0; }
+      .toggle-btn.active { background: #3a7bd5; color: #fff; border-color: #3a7bd5; }
+      .toggle-btn:hover:not(.active) { background: #ddd; }
     </style>
   </head>
   <body>
