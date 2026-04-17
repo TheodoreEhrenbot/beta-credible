@@ -38,6 +38,7 @@ fn app() -> Html {
     let cm1_str = use_state(|| "10".to_string());
     let cn2_str = use_state(|| "3".to_string());
     let cm2_str = use_state(|| "10".to_string());
+    let compare_threshold_str = use_state(|| "0".to_string());
     let compare_result: UseStateHandle<Option<String>> = use_state(|| None);
 
     // ── Compare: rate-based alternate input ──────────────────────────────────
@@ -46,6 +47,7 @@ fn app() -> Html {
     let crate1_str = use_state(|| "70%".to_string());
     let cm2_rate_str = use_state(|| "100".to_string());
     let crate2_str = use_state(|| "30%".to_string());
+    let compare_rate_threshold_str = use_state(|| "0".to_string());
     let compare_rate_result: UseStateHandle<Option<String>> = use_state(|| None);
 
     // ── Tab click ────────────────────────────────────────────────────────────
@@ -235,6 +237,7 @@ fn app() -> Html {
         let cm1_str = cm1_str.clone();
         let cn2_str = cn2_str.clone();
         let cm2_str = cm2_str.clone();
+        let compare_threshold_str = compare_threshold_str.clone();
         let result = compare_result.clone();
         Callback::from(move |_: MouseEvent| {
             let parse_u64 = |s: &str, name: &str| -> Result<u64, String> {
@@ -258,20 +261,36 @@ fn app() -> Html {
                 Ok(v) => v,
                 Err(e) => { result.set(Some(e)); return; }
             };
-            match compare_two_trials(n1, m1, n2, m2) {
+            let threshold: f64 = match compare_threshold_str.trim().parse() {
+                Ok(v) => v,
+                Err(_) => {
+                    result.set(Some("Error: threshold r must be a number (e.g. 0, 0.05, -0.1)".to_string()));
+                    return;
+                }
+            };
+            match compare_two_trials(n1, m1, n2, m2, threshold) {
                 Ok(r) => {
                     let text = format!(
                         "Compare two trials (independent uniform priors)\n\
                          Trial 1:         {n1}/{m1} successes  →  posterior mean {pe1:.6}\n\
+                                          95% CI: [{ci1lo:.6}, {ci1hi:.6}]\n\
                          Trial 2:         {n2}/{m2} successes  →  posterior mean {pe2:.6}\n\
+                                          95% CI: [{ci2lo:.6}, {ci2hi:.6}]\n\
                          Mean difference: E[p1 − p2] = {diff:.6}\n\
                          P(p1 > p2):      {pgt:.4}  (Monte Carlo, N=100,000)\n\
+                         P(p1−p2 > {r:.4}): {pgt_r:.4}  (Monte Carlo, N=100,000)\n\
                          95% CI on diff:  [{cilo:.6}, {cihi:.6}]  (MC percentiles)\n\
                          (Gelman et al. BDA 3rd ed. Ch. 2; Robert & Casella MCM 2nd ed. Ch. 3)",
                         pe1 = r.mean1,
+                        ci1lo = r.ci1_lower,
+                        ci1hi = r.ci1_upper,
                         pe2 = r.mean2,
+                        ci2lo = r.ci2_lower,
+                        ci2hi = r.ci2_upper,
                         diff = r.mean_diff,
                         pgt = r.prob_p1_gt_p2,
+                        r = r.threshold,
+                        pgt_r = r.prob_diff_gt_threshold,
                         cilo = r.ci_diff_lower,
                         cihi = r.ci_diff_upper,
                     );
@@ -288,6 +307,7 @@ fn app() -> Html {
         let crate1_str = crate1_str.clone();
         let cm2_rate_str = cm2_rate_str.clone();
         let crate2_str = crate2_str.clone();
+        let compare_rate_threshold_str = compare_rate_threshold_str.clone();
         let result = compare_rate_result.clone();
         Callback::from(move |_: MouseEvent| {
             let m1: u64 = match cm1_rate_str.trim().parse() {
@@ -312,24 +332,40 @@ fn app() -> Html {
                 Ok(v) => v,
                 Err(e) => { result.set(Some(format!("Error: {e}"))); return; }
             };
+            let threshold: f64 = match compare_rate_threshold_str.trim().parse() {
+                Ok(v) => v,
+                Err(_) => {
+                    result.set(Some("Error: threshold r must be a number (e.g. 0, 0.05, -0.1)".to_string()));
+                    return;
+                }
+            };
             let n1 = (rate1 * m1 as f64).round() as u64;
             let n2 = (rate2 * m2 as f64).round() as u64;
-            match compare_two_trials(n1, m1, n2, m2) {
+            match compare_two_trials(n1, m1, n2, m2, threshold) {
                 Ok(r) => {
                     let text = format!(
                         "Compare two trials (independent uniform priors)\n\
                          Trial 1:         rate={r1_pct:.4}% of {m1} trials → n1={n1}  →  posterior mean {pe1:.6}\n\
+                                          95% CI: [{ci1lo:.6}, {ci1hi:.6}]\n\
                          Trial 2:         rate={r2_pct:.4}% of {m2} trials → n2={n2}  →  posterior mean {pe2:.6}\n\
+                                          95% CI: [{ci2lo:.6}, {ci2hi:.6}]\n\
                          Mean difference: E[p1 − p2] = {diff:.6}\n\
                          P(p1 > p2):      {pgt:.4}  (Monte Carlo, N=100,000)\n\
+                         P(p1−p2 > {r:.4}): {pgt_r:.4}  (Monte Carlo, N=100,000)\n\
                          95% CI on diff:  [{cilo:.6}, {cihi:.6}]  (MC percentiles)\n\
                          (Gelman et al. BDA 3rd ed. Ch. 2; Robert & Casella MCM 2nd ed. Ch. 3)",
                         r1_pct = rate1 * 100.0,
                         r2_pct = rate2 * 100.0,
                         pe1 = r.mean1,
+                        ci1lo = r.ci1_lower,
+                        ci1hi = r.ci1_upper,
                         pe2 = r.mean2,
+                        ci2lo = r.ci2_lower,
+                        ci2hi = r.ci2_upper,
                         diff = r.mean_diff,
                         pgt = r.prob_p1_gt_p2,
+                        r = r.threshold,
+                        pgt_r = r.prob_diff_gt_threshold,
                         cilo = r.ci_diff_lower,
                         cihi = r.ci_diff_upper,
                     );
@@ -535,6 +571,10 @@ fn app() -> Html {
                         <label for="cm2">{"Trial 2 trials (m2)"}</label>
                         <input id="cm2" type="number" min="1" value={(*cm2_str).clone()} oninput={on_input!(cm2_str)} />
                     </div>
+                    <div class="field">
+                        <label for="compare_threshold">{"Threshold r for P(p1−p2 > r)"}</label>
+                        <input id="compare_threshold" type="text" style="width: 80px" value={(*compare_threshold_str).clone()} oninput={on_input!(compare_threshold_str)} />
+                    </div>
                     <button onclick={on_compare_compute}>{"Compute"}</button>
                 </div>
                 { if let Some(text) = (*compare_result).clone() {
@@ -562,6 +602,10 @@ fn app() -> Html {
                     <div class="field">
                         <label for="crate2">{"Trial 2 rate"}</label>
                         <input id="crate2" type="text" style="width: 80px" value={(*crate2_str).clone()} oninput={on_input!(crate2_str)} />
+                    </div>
+                    <div class="field">
+                        <label for="compare_rate_threshold">{"Threshold r for P(p1−p2 > r)"}</label>
+                        <input id="compare_rate_threshold" type="text" style="width: 80px" value={(*compare_rate_threshold_str).clone()} oninput={on_input!(compare_rate_threshold_str)} />
                     </div>
                     <button onclick={on_compare_rate_compute}>{"Compute"}</button>
                 </div>

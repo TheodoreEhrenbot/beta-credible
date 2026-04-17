@@ -131,6 +131,18 @@ pub struct CompareTwoTrialsResult {
     pub ci_diff_lower: f64,
     /// Upper bound of 95% credible interval on p1 - p2 (MC percentile).
     pub ci_diff_upper: f64,
+    /// 95% credible interval lower bound for trial 1 posterior.
+    pub ci1_lower: f64,
+    /// 95% credible interval upper bound for trial 1 posterior.
+    pub ci1_upper: f64,
+    /// 95% credible interval lower bound for trial 2 posterior.
+    pub ci2_lower: f64,
+    /// 95% credible interval upper bound for trial 2 posterior.
+    pub ci2_upper: f64,
+    /// P(p1 - p2 > threshold) estimated via Monte Carlo.
+    pub prob_diff_gt_threshold: f64,
+    /// The threshold value r used for prob_diff_gt_threshold.
+    pub threshold: f64,
 }
 
 /// Parse a rate string into a probability in [0, 1].
@@ -282,18 +294,21 @@ pub fn same_p_probability(
 /// # Arguments
 /// - `n1`, `m1`: successes and trials in trial 1
 /// - `n2`, `m2`: successes and trials in trial 2
+/// - `threshold`: value r for computing P(p1 - p2 > r); use 0.0 for P(p1 > p2)
 ///
 /// # Method
 /// Independent uniform priors → Beta(n+1, m-n+1) posteriors.
 /// Closed-form means and mean difference (Gelman et al. BDA 3rd ed., Ch. 2).
-/// P(p1 > p2) via Monte Carlo: N=100_000 paired Beta samples; count s1 > s2.
+/// P(p1 > p2) and P(p1-p2 > threshold) via Monte Carlo: N=100_000 paired Beta samples.
 /// 95% CI on p1-p2 via MC percentiles (2.5th and 97.5th).
+/// 95% CIs on individual posteriors via Beta quantiles (equal-tailed).
 /// Source: Robert & Casella, "Monte Carlo Statistical Methods" 2nd ed., Ch. 3.
 pub fn compare_two_trials(
     n1: u64,
     m1: u64,
     n2: u64,
     m2: u64,
+    threshold: f64,
 ) -> Result<CompareTwoTrialsResult, StatsError> {
     if m1 == 0 {
         return Err(StatsError::ZeroTrials(m1));
@@ -317,27 +332,33 @@ pub fn compare_two_trials(
     let mean2 = a2 / (a2 + b2);
     let mean_diff = mean1 - mean2;
 
+    // 95% credible intervals for each trial's posterior
+    let ci1 = credible_interval(n1, m1, 0.95)?;
+    let ci2 = credible_interval(n2, m2, 0.95)?;
+
     let beta1 = StatrsBeta::new(a1, b1).map_err(|e| StatsError::BetaError(e.to_string()))?;
     let beta2 = StatrsBeta::new(a2, b2).map_err(|e| StatsError::BetaError(e.to_string()))?;
     let mut rng = rand::thread_rng();
 
     const N: usize = 100_000;
-    let mut count_gt = 0usize;
     let mut diffs = Vec::with_capacity(N);
 
     for _ in 0..N {
         let s1 = beta1.sample(&mut rng);
         let s2 = beta2.sample(&mut rng);
-        let d = s1 - s2;
-        diffs.push(d);
-        if s1 > s2 {
-            count_gt += 1;
-        }
+        diffs.push(s1 - s2);
     }
 
-    let prob_p1_gt_p2 = count_gt as f64 / N as f64;
-
     diffs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    // P(p1 > p2) = P(diff > 0): binary search for first index where diff > 0
+    let gt_zero_idx = diffs.partition_point(|&d| d <= 0.0);
+    let prob_p1_gt_p2 = (N - gt_zero_idx) as f64 / N as f64;
+
+    // P(p1 - p2 > threshold): binary search for first index where diff > threshold
+    let gt_thresh_idx = diffs.partition_point(|&d| d <= threshold);
+    let prob_diff_gt_threshold = (N - gt_thresh_idx) as f64 / N as f64;
+
     let lo_idx = ((0.025 * N as f64) as usize).min(N - 1);
     let hi_idx = ((0.975 * N as f64) as usize).min(N - 1);
     let ci_diff_lower = diffs[lo_idx];
@@ -350,6 +371,12 @@ pub fn compare_two_trials(
         prob_p1_gt_p2,
         ci_diff_lower,
         ci_diff_upper,
+        ci1_lower: ci1.lower,
+        ci1_upper: ci1.upper,
+        ci2_lower: ci2.lower,
+        ci2_upper: ci2.upper,
+        prob_diff_gt_threshold,
+        threshold,
     })
 }
 
@@ -768,7 +795,7 @@ mod tests {
     /// mean_diff = 0.5 - 1/3 = 1/6 ≈ 0.16667
     #[test]
     fn test_compare_mean_diff_closed_form() {
-        let r = compare_two_trials(5, 10, 3, 10).unwrap();
+        let r = compare_two_trials(5, 10, 3, 10, 0.0).unwrap();
         assert_approx(r.mean1, 6.0 / 12.0, EPS, "mean1");
         assert_approx(r.mean2, 4.0 / 12.0, EPS, "mean2");
         assert_approx(r.mean_diff, 1.0 / 6.0, EPS, "mean_diff");
@@ -777,7 +804,7 @@ mod tests {
     /// When both trials are identical, mean_diff should be 0.
     #[test]
     fn test_compare_identical_trials_mean_diff_zero() {
-        let r = compare_two_trials(5, 10, 5, 10).unwrap();
+        let r = compare_two_trials(5, 10, 5, 10, 0.0).unwrap();
         assert_approx(r.mean_diff, 0.0, EPS, "mean_diff == 0 for identical trials");
     }
 
@@ -786,7 +813,7 @@ mod tests {
     /// Identical → P(p1 > p2) = 0.5 by symmetry.
     #[test]
     fn test_compare_prob_symmetry_identical() {
-        let r = compare_two_trials(10, 10, 10, 10).unwrap();
+        let r = compare_two_trials(10, 10, 10, 10, 0.0).unwrap();
         // Allow ±0.02 for Monte Carlo variance at N=100_000
         assert!(
             (r.prob_p1_gt_p2 - 0.5).abs() < 0.02,
@@ -800,7 +827,7 @@ mod tests {
     /// n2=0,m2=10 → Beta(1,11) ≈ concentrated near 0.
     #[test]
     fn test_compare_prob_extreme_near_one() {
-        let r = compare_two_trials(10, 10, 0, 10).unwrap();
+        let r = compare_two_trials(10, 10, 0, 10, 0.0).unwrap();
         assert!(
             r.prob_p1_gt_p2 > 0.99,
             "P(p1>p2) should be very close to 1.0, got {}",
@@ -811,8 +838,8 @@ mod tests {
     /// P(p1 > p2) and P(p2 > p1) should sum to ~1.0 (ignoring P(p1=p2)≈0).
     #[test]
     fn test_compare_prob_complement() {
-        let r1 = compare_two_trials(7, 10, 3, 10).unwrap();
-        let r2 = compare_two_trials(3, 10, 7, 10).unwrap();
+        let r1 = compare_two_trials(7, 10, 3, 10, 0.0).unwrap();
+        let r2 = compare_two_trials(3, 10, 7, 10, 0.0).unwrap();
         // P(p1>p2) + P(p2>p1) ≈ 1 (ties are measure-zero for continuous distributions)
         assert!(
             (r1.prob_p1_gt_p2 + r2.prob_p1_gt_p2 - 1.0).abs() < 0.01,
@@ -820,16 +847,58 @@ mod tests {
         );
     }
 
+    /// Individual trial 95% CIs match credible_interval results.
+    #[test]
+    fn test_compare_individual_cis() {
+        let r = compare_two_trials(7, 10, 3, 10, 0.0).unwrap();
+        let ci1 = credible_interval(7, 10, 0.95).unwrap();
+        let ci2 = credible_interval(3, 10, 0.95).unwrap();
+        assert_approx(r.ci1_lower, ci1.lower, EPS, "ci1_lower");
+        assert_approx(r.ci1_upper, ci1.upper, EPS, "ci1_upper");
+        assert_approx(r.ci2_lower, ci2.lower, EPS, "ci2_lower");
+        assert_approx(r.ci2_upper, ci2.upper, EPS, "ci2_upper");
+    }
+
+    /// P(p1-p2 > 0) matches P(p1 > p2) when threshold is 0.
+    #[test]
+    fn test_compare_threshold_zero_matches_gt() {
+        let r = compare_two_trials(7, 10, 3, 10, 0.0).unwrap();
+        assert_approx(r.prob_diff_gt_threshold, r.prob_p1_gt_p2, 1e-10, "threshold=0 matches gt");
+        assert_approx(r.threshold, 0.0, EPS, "threshold stored");
+    }
+
+    /// Positive threshold reduces P compared to P(p1>p2).
+    #[test]
+    fn test_compare_threshold_positive_lower_prob() {
+        let r = compare_two_trials(7, 10, 3, 10, 0.1).unwrap();
+        let r0 = compare_two_trials(7, 10, 3, 10, 0.0).unwrap();
+        assert!(
+            r.prob_diff_gt_threshold <= r0.prob_p1_gt_p2,
+            "P(diff>0.1) should be ≤ P(diff>0)"
+        );
+    }
+
+    /// Negative threshold increases P above P(p1>p2).
+    #[test]
+    fn test_compare_threshold_negative_higher_prob() {
+        let r = compare_two_trials(7, 10, 3, 10, -0.1).unwrap();
+        let r0 = compare_two_trials(7, 10, 3, 10, 0.0).unwrap();
+        assert!(
+            r.prob_diff_gt_threshold >= r0.prob_p1_gt_p2,
+            "P(diff>-0.1) should be ≥ P(diff>0)"
+        );
+    }
+
     /// Error cases.
     #[test]
     fn test_compare_zero_trials_error() {
-        assert!(compare_two_trials(0, 0, 5, 10).is_err());
-        assert!(compare_two_trials(5, 10, 0, 0).is_err());
+        assert!(compare_two_trials(0, 0, 5, 10, 0.0).is_err());
+        assert!(compare_two_trials(5, 10, 0, 0, 0.0).is_err());
     }
 
     #[test]
     fn test_compare_exceeds_trials_error() {
-        assert!(compare_two_trials(11, 10, 5, 10).is_err());
-        assert!(compare_two_trials(5, 10, 11, 10).is_err());
+        assert!(compare_two_trials(11, 10, 5, 10, 0.0).is_err());
+        assert!(compare_two_trials(5, 10, 11, 10, 0.0).is_err());
     }
 }
