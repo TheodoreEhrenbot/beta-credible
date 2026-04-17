@@ -546,31 +546,22 @@ fn app() -> Html {
                 </>
             }} else { html! {
                 <>
-                <p class="desc">
-                    {"Enter a rate as a decimal (e.g. "}
-                    <code>{"0.72"}</code>
-                    {") or percentage (e.g. "}
-                    <code>{"72"}</code>
-                    {" or "}
-                    <code>{"72%"}</code>
-                    {"). n = round(rate × m) is computed for you."}
-                </p>
                 <div class="form-group">
                     <div class="field">
                         <label for="cm1_rate">{"Trial 1 trials (m1)"}</label>
                         <input id="cm1_rate" type="number" min="1" value={(*cm1_rate_str).clone()} oninput={on_input!(cm1_rate_str)} />
                     </div>
                     <div class="field">
-                        <label for="crate1">{"Trial 1 rate (e.g. '72%' or '0.72')"}</label>
-                        <input id="crate1" type="text" value={(*crate1_str).clone()} oninput={on_input!(crate1_str)} />
+                        <label for="crate1">{"Trial 1 rate"}</label>
+                        <input id="crate1" type="text" style="width: 80px" value={(*crate1_str).clone()} oninput={on_input!(crate1_str)} />
                     </div>
                     <div class="field">
                         <label for="cm2_rate">{"Trial 2 trials (m2)"}</label>
                         <input id="cm2_rate" type="number" min="1" value={(*cm2_rate_str).clone()} oninput={on_input!(cm2_rate_str)} />
                     </div>
                     <div class="field">
-                        <label for="crate2">{"Trial 2 rate (e.g. '30%' or '0.30')"}</label>
-                        <input id="crate2" type="text" value={(*crate2_str).clone()} oninput={on_input!(crate2_str)} />
+                        <label for="crate2">{"Trial 2 rate"}</label>
+                        <input id="crate2" type="text" style="width: 80px" value={(*crate2_str).clone()} oninput={on_input!(crate2_str)} />
                     </div>
                     <button onclick={on_compare_rate_compute}>{"Compute"}</button>
                 </div>
