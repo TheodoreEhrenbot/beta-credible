@@ -830,6 +830,10 @@ fn app() -> Html {
         }} else { html! {
             // ── Hierarchical tab ─────────────────────────────────────────────
             <>
+            <div class="experimental-notice">
+                {"⚡ "}<strong>{"Experimental."}</strong>
+                {" This tab uses MCMC sampling and results may vary between runs. Verify with larger sample sizes for production decisions."}
+            </div>
             <h2>{"Mode 4: Control vs Interventions (hierarchical Bayesian)"}</h2>
             <p class="desc">
                 {"Compare one control arm against K intervention arms using a hierarchical model. "}
